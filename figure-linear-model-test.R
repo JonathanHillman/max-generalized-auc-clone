@@ -1,8 +1,9 @@
 library(data.table)
 library(ggplot2)
 
-auc.improved <- readRDS("../feature-learning-benchmark/auc.improved.rds")
+auc.improved <- readRDS("auc.improved.rds")
 roc.dt.list <- list()
+
 for(test.fold.i in 1:nrow(auc.improved)){
   one.fold <- auc.improved[test.fold.i]
   roc.dt.list[[test.fold.i]] <- one.fold[, data.table(
@@ -10,20 +11,26 @@ for(test.fold.i in 1:nrow(auc.improved)){
     rows=.N,
     roc[[1]])]
 }
+
 (roc.dt <- do.call(rbind, roc.dt.list))
 roc.dt[, fn0 := fn-min(fn), by=.(data.name, test.fold, pred.name)]
 roc.dt[, min.fp.fn := ifelse(fp<fn0, fp, fn0)]
 roc.dt[, width := max.thresh-min.thresh]
 roc.dt[, area := ifelse(min.fp.fn==0, 0, min.fp.fn*width)]
+
 (aum.dt <- roc.dt[, .(
   aum=sum(area)
 ), keyby=.(data.name, test.fold, pred.name)])
 best.aum <- aum.dt[, .SD[which.min(aum), .(best.aum=aum)], by=.(data.name, test.fold)]
 
 
-testFold.vec <- Sys.glob("../neuroblastoma-data/data/*/cv/*/testFolds/*")
+#testFold.vec <- Sys.glob("../neuroblastoma-data/data/*/cv/*/testFolds/*")
+testFold.vec <- Sys.glob("~/ROC-Curve-Analysis/neuroblastoma-data-master/neuroblastoma-data-master/data/*/cv/*/testFolds/*")
+testFold.vec <- file.path("C:/Users/jonat/Documents/ROC-Curve-Analysis/neuroblastoma-data-master/neuroblastoma-data-master/data/ATAC_JV_adipose/cv/equal_labels/testFolds/4")
+testFold.path <- testFold.vec
 
-OneFold <- function(testFold.path){
+#OneFold <- function(testFold.path)
+{
   cv.path <- dirname(dirname(testFold.path))
   folds.csv <- file.path(cv.path, "folds.csv")
   cv.type <- basename(cv.path)
@@ -47,7 +54,7 @@ OneFold <- function(testFold.path){
   folds.dt <- data.table::fread(folds.csv)
   folds.dt[fold == test.fold, set := "test"]
   folds.dt[fold != test.fold, set := rep(
-    c("subtrain", "validation"), l=.N)]
+    1:4, l=.N)]
   seqs.train <- folds.dt[["sequenceID"]]
   X.all <- scale(data.list$inputs[, -1])
   rownames(X.all) <- data.list$inputs$sequenceID
@@ -57,13 +64,14 @@ OneFold <- function(testFold.path){
     set.list[[s]] <- rownames(X.finite) %in% folds.dt[s==set, sequenceID]
   }
   X.list <- lapply(set.list, function(i)X.finite[i, ])
-  neg.t.X.subtrain <- -t(X.list[["subtrain"]])
+  neg.t.X.subtrain.list <- lapply(X.list[1:4], function(x){-t(x)})
   y.train <- data.list[["outputs"]][
     seqs.train,
     cbind(min.log.lambda, max.log.lambda),
     on="sequenceID"]
   keep <- apply(is.finite(y.train), 1, any)
   X.train <- X.finite[seqs.train, ]
+  
   init.fun.list <- list(
     IntervalRegressionCV=function(){
       fit <- penaltyLearning::IntervalRegressionCV(
@@ -91,12 +99,14 @@ OneFold <- function(testFold.path){
       set.dt <- pred.dt[is.set]
       penaltyLearning::ROChange(
         data.list$evaluation, set.dt, "sequenceID")
+      
     }
+    neg.t.X.subtrain <- neg.t.X.subtrain.list[[seed]]
     for(iteration in 1:50){
       summary.dt.list <- list()
       set.roc.list <- list()
       for(set in names(set.list)){
-        set.roc.list[[set]] <- computeAUM(weight.vec, intercept, set.list[[set]])
+        set.roc.list[[set]] <- computeAUM(weight.vec, intercept[seed], set.list[[set]])
         summary.dt.list[[set]] <- with(set.roc.list[[set]], data.table(
           set,
           thresholds[threshold=="predicted"],
@@ -124,7 +134,7 @@ OneFold <- function(testFold.path){
       set.aum.list <- list()
       for(step.size in 10^seq(-10, 0, by=0.5)){
         new.weight.vec <- take.step(step.size)
-        for(set in "subtrain"){
+        for(set in 1:4){
           set.roc <- computeAUM(new.weight.vec, 0, set.list[[set]])
           set.aum.list[[paste(step.size, set)]] <- data.table(
             step.size, set, aum=set.roc$aum,
@@ -133,7 +143,7 @@ OneFold <- function(testFold.path){
         }
       }
       set.aum <- do.call(rbind, set.aum.list)
-      best.dt <- set.aum[, .SD[min(aum)==aum], by=set]
+      best.dt <- set.aum[, .SD[which.min(aum)], by=set]
       ggplot()+
         geom_line(aes(
           step.size, aum),
@@ -148,7 +158,7 @@ OneFold <- function(testFold.path){
         scale_x_log10()+
         scale_y_log10()+
         facet_grid(set ~ ., scales="free")
-      weight.vec <- take.step(best.dt[["step.size"]])
+      weight.vec <- take.step(best.dt[set == seed, step.size])
       intercept <- best.dt[["intercept"]]
     }#iteration
   }#seed/init.name
@@ -204,9 +214,9 @@ ggplot()+
     iteration, aum, color=init.name,
     group=paste(seed, init.name)),
     data=validation.it[
-     ,
-       .SD[which.min(aum)],
-       by=.(data.name, test.fold, init.name, seed)])+
+      ,
+      .SD[which.min(aum)],
+      by=.(data.name, test.fold, init.name, seed)])+
   facet_grid(data.name + test.fold ~ ., scales="free", labeller=label_both)
 
 valid.best.ids <- all.it[
@@ -273,7 +283,7 @@ png(
   width=8, height=6, res=100, units="in")
 print(gg)
 dev.off()
-b
+
 test.show[, neg.auc := -auc]
 test.show.tall <- melt(
   test.show[init.name=="IntervalRegressionCV"],
@@ -308,4 +318,3 @@ png(
   width=10, height=6, res=100, units="in")
 print(gg)
 dev.off()
-
